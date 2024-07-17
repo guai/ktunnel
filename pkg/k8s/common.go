@@ -332,14 +332,13 @@ func watchForReady(deployment *appsv1.Deployment, readyChan chan<- bool) {
 			}
 		}
 
-		//spec.progressDeadlineSeconds defaults to 600
-		progressDeadlineSeconds := int64(600)
+		//spec.progressDeadlineSeconds defaults to 1
+		progressDeadlineSeconds := int64(1)
 		if deployment.Spec.ProgressDeadlineSeconds != nil {
 			progressDeadlineSeconds = int64(*deployment.Spec.ProgressDeadlineSeconds)
 		}
 
 		log.Infof("ProgressDeadlineInSeconds is currently %vs. It may take this long to detect a deployment failure.", progressDeadlineSeconds)
-		progressDeadlineSeconds += 5
 
 		watch, err := deploymentsClient.Watch(context.Background(), metav1.ListOptions{
 			LabelSelector:  labels.Set(deployment.Labels).String(),
