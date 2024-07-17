@@ -11,9 +11,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func SetLogLevel(l log.Level) {
+	log.SetLevel(l)
+	if l.String() == "verbose" || l.String() == "debug" {
+		Verbose = true
+	}
+}
+
 func injectToDeployment(o *appsv1.Deployment, c *apiv1.Container, image string, readyChan chan<- bool) (bool, error) {
 	if hasSidecar(o.Spec.Template.Spec, image) {
-		log.Warn(fmt.Sprintf("%s already injected to the deplyoment", image))
+		log.Warn(fmt.Sprintf("%s already injected to the deployment", image))
 		watchForReady(o, readyChan)
 		return true, nil
 	}
@@ -33,7 +40,11 @@ func injectToDeployment(o *appsv1.Deployment, c *apiv1.Container, image string, 
 func InjectSidecar(namespace, objectName *string, port *int, image string, cert string, key string, readyChan chan<- bool, kubecontext *string) (bool, error) {
 	log.Infof("Injecting tunnel sidecar to %s/%s", *namespace, *objectName)
 	getClients(namespace, kubecontext)
-	co := newContainer(*port, image, []apiv1.ContainerPort{}, cert, key)
+	cpuReq := int64(100) // in milli-cpu
+	cpuLimit := int64(500)
+	memReq := int64(100) // in mega-bytes
+	memLimit := int64(1000)
+	co := newContainer(*port, image, []apiv1.ContainerPort{}, cert, key, cpuReq, cpuLimit, memReq, memLimit)
 	obj, err := deploymentsClient.Get(context.Background(), *objectName, metav1.GetOptions{})
 	if err != nil {
 		return false, err

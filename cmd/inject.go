@@ -39,7 +39,7 @@ ktunnel inject deployment mydeployment 3306 6379
 		ctx, cancel := context.WithCancel(context.Background())
 		if verbose {
 			logger.SetLevel(log.DebugLevel)
-			k8s.Verbose = true
+			k8s.SetLogLevel(log.DebugLevel)
 		}
 		o := sync.Once{}
 		// Inject
@@ -94,8 +94,6 @@ ktunnel inject deployment mydeployment 3306 6379
 			log.Fatalf("Failed to run port forwarding: %v", err)
 			os.Exit(1)
 		}
-		log.Info("Waiting for port forward to finish")
-		wg.Wait()
 		for _, srcPort := range *sourcePorts {
 			go func(port string) {
 				p, err := strconv.ParseInt(port, 10, 0)

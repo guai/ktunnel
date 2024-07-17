@@ -35,8 +35,10 @@ import (
 )
 
 const (
-	Image            = "docker.io/omrieival/ktunnel"
-	kubeConfigEnvVar = "KUBECONFIG"
+	Image                   = "docker.io/omrieival/ktunnel"
+	kubeConfigEnvVar        = "KUBECONFIG"
+	deploymentNameLabel     = "app.kubernetes.io/name"
+	deploymentInstanceLabel = "app.kubernetes.io/instance"
 )
 
 type ByCreationTime []apiv1.Pod
@@ -93,10 +95,13 @@ func getClients(namespace *string, kubeCtx *string) {
 	})
 }
 
-func getAllPods(namespace, kubeCtx *string) (*apiv1.PodList, error) {
+func getPodsFilteredByLabel(namespace, kubeCtx, labelSelector *string) (*apiv1.PodList, error) {
 	getClients(namespace, kubeCtx)
-	// TODO: filter pod list
-	pods, err := podsClient.List(context.Background(), metav1.ListOptions{})
+	pods, err := podsClient.List(
+		context.Background(), metav1.ListOptions{
+			LabelSelector: *labelSelector,
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +117,7 @@ func hasSidecar(podSpec apiv1.PodSpec, image string) bool {
 	return false
 }
 
-func newContainer(port int, image string, containerPorts []apiv1.ContainerPort, cert, key string) *apiv1.Container {
+func newContainer(port int, image string, containerPorts []apiv1.ContainerPort, cert, key string, cReq, cLimit, mReq, mLimit int64) *apiv1.Container {
 	args := []string{"server", "-p", strconv.FormatInt(int64(port), 10)}
 	if Verbose == true {
 		args = append(args, "-v")
@@ -124,10 +129,10 @@ func newContainer(port int, image string, containerPorts []apiv1.ContainerPort, 
 		args = append(args, fmt.Sprintf("--key %s", key))
 	}
 	cpuRequest, cpuLimit, memRequest, memLimit := resource.Quantity{}, resource.Quantity{}, resource.Quantity{}, resource.Quantity{}
-	cpuRequest.SetMilli(int64(500))
-	cpuLimit.SetMilli(int64(1000))
-	memRequest.SetScaled(int64(100), resource.Mega)
-	memLimit.SetScaled(int64(1), resource.Giga)
+	cpuRequest.SetMilli(cReq)
+	cpuLimit.SetMilli(cLimit)
+	memRequest.SetScaled(mReq, resource.Mega)
+	memLimit.SetScaled(mLimit, resource.Mega)
 	containerUid := int64(1000)
 
 	return &apiv1.Container{
@@ -152,17 +157,18 @@ func newContainer(port int, image string, containerPorts []apiv1.ContainerPort, 
 	}
 }
 
-func newDeployment(namespace, name string, port int, image string, ports []apiv1.ContainerPort, selector map[string]string, deploymentLabels map[string]string, cert, key string) *appsv1.Deployment {
+func newDeployment(namespace, name string, port int, image string, ports []apiv1.ContainerPort, selector map[string]string, deploymentLabels map[string]string, deploymentAnnotations map[string]string, cert, key string, cpuReq, cpuLimit, memReq, memLimit int64) *appsv1.Deployment {
 	replicas := int32(1)
-	deploymentLabels["app.kubernetes.io/name"] = name
-	deploymentLabels["app.kubernetes.io/instance"] = name
-	co := newContainer(port, image, ports, cert, key)
+	deploymentLabels[deploymentNameLabel] = name
+	deploymentLabels[deploymentInstanceLabel] = name
+	co := newContainer(port, image, ports, cert, key, cpuReq, cpuLimit, memReq, memLimit)
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    deploymentLabels,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      deploymentLabels,
+			Annotations: deploymentAnnotations,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
@@ -171,7 +177,8 @@ func newDeployment(namespace, name string, port int, image string, ports []apiv1
 			},
 			Template: apiv1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: deploymentLabels,
+					Labels:      deploymentLabels,
+					Annotations: deploymentAnnotations,
 				},
 				Spec: apiv1.PodSpec{
 					NodeSelector: selector,
@@ -209,19 +216,20 @@ func newService(namespace, name string, ports []apiv1.ServicePort, serviceType a
 }
 
 func getPodNames(namespace, deploymentName *string, podsPtr *[]string, kubeCtx *string) error {
-	allPods, err := getAllPods(namespace, kubeCtx)
+	labelSelector := deploymentNameLabel + "=" + *deploymentName + "," + deploymentInstanceLabel + "=" + *deploymentName
+	filteredPods, err := getPodsFilteredByLabel(namespace, kubeCtx, &labelSelector)
 	if err != nil {
 		return err
 	}
 	pods := *podsPtr
 	matchingPods := ByCreationTime{}
 	pIndex := 0
-	for _, p := range allPods.Items {
+	for _, p := range filteredPods.Items {
 		if pIndex >= len(pods) {
 			log.Info("All pods located for port-forwarding")
 			break
 		}
-		if strings.HasPrefix(p.Name, *deploymentName) && p.Status.Phase == apiv1.PodRunning {
+		if p.Status.Phase == apiv1.PodRunning {
 			matchingPods = append(matchingPods, p)
 		}
 	}
@@ -258,6 +266,8 @@ func PortForward(namespace, deploymentName *string, targetPort string, fwdWaitGr
 	for i := 0; i < len(sourcePorts); i++ {
 		sourcePorts[i] = strconv.FormatInt(numPort+int64(i), 10)
 	}
+
+	forwarderErrChan := make(chan error)
 	for i, podName := range podNames {
 		readyChan := make(chan struct{}, 1)
 		ports := []string{fmt.Sprintf("%s:%s", sourcePorts[i], targetPort)}
@@ -290,11 +300,25 @@ func PortForward(namespace, deploymentName *string, targetPort string, fwdWaitGr
 		}()
 		go func() {
 			if err = forwarder.ForwardPorts(); err != nil { // Locks until stopChan is closed.
-				log.Error(err)
+				forwarderErrChan <- err
 			}
 		}()
 	}
-	return &sourcePorts, nil
+
+	log.Info("Waiting for port forward to finish")
+
+	doneCh := make(chan struct{})
+	go func() {
+		fwdWaitGroup.Wait()
+		close(doneCh)
+	}()
+
+	select {
+	case err := <-forwarderErrChan:
+		return nil, err
+	case <-doneCh:
+		return &sourcePorts, nil
+	}
 }
 
 func getPortForwardUrl(config *rest.Config, namespace string, podName string) *url.URL {
